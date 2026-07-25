@@ -22,6 +22,11 @@ weights/
 *.engine
 *.pth
 
+# 大数据目录（不推送）
+train/
+test/
+outputs/
+
 # 系统文件
 .DS_Store
 Thumbs.db

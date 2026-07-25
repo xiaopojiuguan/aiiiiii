@@ -1,0 +1,97 @@
+# SteelGuard-YOLO 强基线配置
+# 对应方案第 14.1 节：可独立提交的强基线
+
+model:
+  name: "yolo11m"           # YOLO11m-P2
+  p2_head: true              # stride=4 小目标检测头
+  aafm: false                # 阶段 A 不启用
+  mffm: false                # 阶段 A 不启用
+
+input:
+  grayscale: "repeat_to_3_channels"
+  tile_size: 1280
+  tile_overlap: 256
+  stride: 1024
+  global_long_side: 1536
+  roi_mask: true
+
+loss:
+  cls: "qfl"                 # Quality Focal Loss + 类别权重
+  box: "ciou"                # CIoU loss
+
+training:
+  optimizer: "AdamW"
+  lr: 2.0e-4
+  weight_decay: 5.0e-4
+  warmup_epochs: 3
+  scheduler: "cosine"
+  epochs: 100
+  batch_size: 4
+  gradient_accumulation: 4   # 等效 batch=16
+  precision: "amp"           # FP16 mixed precision
+  ema: true
+  early_stopping_patience: 20
+
+  # 类别感知采样
+  rare_class_sampling: true
+  sampling_alpha: 0.5        # p(c) ∝ n(c)^(-α)
+  max_repeat_per_rare: 4
+
+  # 基础灰度域增强
+  basic_gray_domain_aug: true
+
+  # 分组划分
+  group_split: true
+
+  # Mosaic（训练后期关闭）
+  mosaic: 0.5                # 50% 概率
+  mosaic_disable_last_epochs: 0.3  # 最后 30% epoch 关闭
+
+augmentation:
+  hsv_h: 0.0
+  hsv_s: 0.0
+  hsv_v: 0.3                 # 灰度亮度变化
+  degrees: 0.0               # 不旋转
+  translate: 0.1
+  scale: 0.2
+  shear: 0.0
+  perspective: 0.0
+  flipud: 0.0                # 工业相机不倒置
+  fliplr: 0.5                # 水平翻转
+  mosaic: 0.5
+  mixup: 0.0                 # 阶段 A 关闭
+
+inference:
+  conf_threshold: 0.001      # PR曲线统一低预过滤
+  max_det: 300               # 每图最大检测数
+  nms:
+    type: "soft_nms"
+    iou_threshold: 0.55
+    sigma: 0.5
+  per_class_conf:
+    jieba: 0.25
+    zonglie: 0.15
+    qilie: 0.05
+    jiaza: 0.20
+    yiwuyaru: 0.25
+    huashang: 0.10
+    mamianmakeng: 0.25
+    yanghuatiepi: 0.25
+    gunyin: 0.25
+
+data:
+  train_dir: "train/train"
+  test_dir: "test/初赛"
+  val_ratio: 0.2
+  num_folds: 5
+  seed: 42
+
+eval:
+  protocol_version: "v1"
+  iou_thresholds: [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
+  main_iou: 0.5
+  critical_classes: ["qilie", "zonglie"]
+  f2_beta: 2.0
+
+output:
+  submission_file: "submission.json"

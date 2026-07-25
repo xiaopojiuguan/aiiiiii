@@ -1,0 +1,19 @@
+# SteelGuard-YOLO Tile Dataset Configuration
+# 训练数据: 1280×1280 ROI切片
+# 对应方案第 5.1.2 节
+
+path: train
+train: tiles_train/images
+val: tiles_val/images
+
+nc: 9
+names:
+  0: jieba
+  1: zonglie
+  2: qilie
+  3: jiaza
+  4: yiwuyaru
+  5: huashang
+  6: mamianmakeng
+  7: yanghuatiepi
+  8: gunyin
