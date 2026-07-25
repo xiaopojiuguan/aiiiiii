@@ -1,0 +1,27 @@
+# 数据集（太大，不上传）
+训练数据集/
+初赛测试集/
+
+# 比赛页面静态资源
+赛道1_files/
+
+# Claude 项目配置
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 训练输出
+runs/
+weights/
+*.pt
+*.onnx
+*.engine
+*.pth
+
+# 系统文件
+.DS_Store
+Thumbs.db
