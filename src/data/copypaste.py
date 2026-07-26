@@ -205,31 +205,36 @@ def apply_copy_paste_to_tiles(
     logger.info(f"Found {len(bg_tiles)} background tiles for Copy-Paste")
     random.shuffle(bg_tiles)
 
+    # 构建按类别索引的 patch 列表
+    class_patches = {cid: plist for cid, plist in patches.items() if plist}
+
+    # 计算每类目标生成数（稀有类更多）
+    total_patches = sum(len(v) for v in class_patches.values())
+    class_weights_inv = {cid: 1.0 / max(len(class_patches[cid]), 1) for cid in class_patches}
+    total_w = sum(class_weights_inv.values())
+    class_probs = {cid: w / total_w for cid, w in class_weights_inv.items()}
+
     count = 0
+    class_counts = defaultdict(int)
     for stem in bg_tiles:
         if count >= max_new_tiles:
             break
 
         img_path = img_dir / f"{stem}.jpg"
-        lbl_path = lbl_dir / f"{stem}.txt"
         tile = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
         if tile is None:
             continue
-
-        # 从稀有类随机选择
-        all_patches = []
-        for cid, patch_list in patches.items():
-            all_patches.extend([(cid, p) for p in patch_list])
-
-        if not all_patches:
-            break
 
         new_labels = []
         augmented = tile.copy()
         n_pasted = 0
 
         for _ in range(max_per_tile):
-            cid, patch_info = random.choice(all_patches)
+            # ---- 修复：先选类别（稀有类优先），再选该类的 patch ----
+            cids = list(class_probs.keys())
+            probs = [class_probs[c] for c in cids]
+            cid = random.choices(cids, weights=probs, k=1)[0]
+            patch_info = random.choice(class_patches[cid])
 
             # 随机粘贴位置（ROI 内）
             paste_x = random.randint(0, 1280 - min(patch_info["width"], 200) - 50)
@@ -247,6 +252,7 @@ def apply_copy_paste_to_tiles(
             nh = (bbox[3] - bbox[1]) / 1280
             new_labels.append((cid, xc, yc, nw, nh))
             n_pasted += 1
+            class_counts[cid] += 1
 
         if n_pasted == 0:
             continue
@@ -262,7 +268,10 @@ def apply_copy_paste_to_tiles(
 
         count += 1
 
-    logger.info(f"Generated {count} Copy-Paste augmented tiles ({cp_version})")
+    logger.info(f"Generated {count} Copy-Paste tiles ({cp_version})")
+    for cid, cnt in sorted(class_counts.items()):
+        name = CLASS_NAMES[cid] if cid < len(CLASS_NAMES) else f"cls_{cid}"
+        logger.info(f"  {name}: {cnt} pasted")
     return count
 
 
