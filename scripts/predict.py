@@ -153,18 +153,23 @@ class SteelGuardPredictor:
                     "score": score, "class_id": cls_id,
                 })
 
-        # === Soft-NMS 去重（分数写回 dict）===
-        all_predictions = self._soft_nms(all_predictions)
-
-        # 按分数排序 → 限制 max_det → 裁剪坐标
-        all_predictions.sort(key=lambda x: x["score"], reverse=True)
-        all_predictions = all_predictions[:self.max_det]
-
+        # 裁剪坐标 + 滤除无效框
+        valid_preds = []
         for pred in all_predictions:
             pred["xmin"] = max(0.0, min(float(w), pred["xmin"]))
             pred["ymin"] = max(0.0, min(float(h), pred["ymin"]))
             pred["xmax"] = max(0.0, min(float(w), pred["xmax"]))
             pred["ymax"] = max(0.0, min(float(h), pred["ymax"]))
+            if pred["xmax"] > pred["xmin"] + 1 and pred["ymax"] > pred["ymin"] + 1:
+                valid_preds.append(pred)
+        all_predictions = valid_preds
+
+        # === Soft-NMS 去重（分数写回 dict）===
+        all_predictions = self._soft_nms(all_predictions)
+
+        # 按分数排序 → 限制 max_det
+        all_predictions.sort(key=lambda x: x["score"], reverse=True)
+        all_predictions = all_predictions[:self.max_det]
 
         return all_predictions
 
