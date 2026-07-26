@@ -138,6 +138,8 @@ def evaluate_predictions(
             gt_c = np.array([g[1:5] for g in gts if g[0] == cid])
             pred_c = [(p[1:5], p[5]) for p in preds if p[0] == cid]  # pred[5]=score!
 
+            per_class[cid]["n_gt"] += len(gt_c)  # 逐类累计 GT 数
+
             if not pred_c:
                 continue
 
@@ -148,8 +150,6 @@ def evaluate_predictions(
             per_class[cid]["tp"].extend(tp_c.tolist())
             per_class[cid]["fp"].extend(fp_c.tolist())
             per_class[cid]["scores"].extend(pred_scores.tolist())
-
-        per_class[cid]["n_gt"] += len(gt_c)
 
         # FP/image（基于 IoU=0.5）
         for cid in range(nc):
