@@ -25,7 +25,8 @@ weights/
 # 大数据目录（不推送）
 train/
 test/
-outputs/
+outputs/checkpoints/
+outputs/logs/
 
 # 系统文件
 .DS_Store
