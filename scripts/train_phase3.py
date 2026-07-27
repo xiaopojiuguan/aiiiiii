@@ -105,58 +105,80 @@ def compute_class_weights() -> list:
 
 
 def apply_aafm(model):
-    """对已加载的 YOLO 模型应用 AAFM 结构修改。"""
+    """对已加载的 YOLO 模型应用 AAFM 结构修改。
+
+    替换 DetectionModel._predict_once：backbone (layers 0-10) 完成后，
+    截取 P2/P3 特征 → AAFM 门控融合 → 注入 y[2]/y[4] → neck 继续。
+    """
+    import types
     from src.models.aafm import AAFMBlock
-    from src.models.steelguard import GaussianBlur, BACKBONE_P2_IDX, BACKBONE_P3_IDX
+    from src.models.steelguard import GaussianBlur
 
     detection = model.model
     width = detection.yaml.get("width_multiple", 0.50)
-
     p2_ch = int(128 * width)
     p3_ch = int(256 * width)
 
-    aafm = AAFMBlock(in_channels=3, stem_channels=32,
-                     p2_channels=p2_ch, p3_channels=p3_ch)
+    aafm_block = AAFMBlock(in_channels=3, stem_channels=32,
+                           p2_channels=p2_ch, p3_channels=p3_ch)
     blur = GaussianBlur(kernel_size=31, sigma=10.0, channels=3)
 
-    # 存储 AAFM 模块到模型
-    detection.aafm = aafm
+    detection.aafm = aafm_block
     detection.aafm_blur = blur
-    detection._aafm_features = {}
+    detection.to(model.device if hasattr(model, 'device') else None)
 
-    # 注册 hook 截取 backbone P2/P3 特征
-    def make_hook(name):
-        def hook(module, input, output):
-            detection._aafm_features[name] = output
-        return hook
+    def aafm_predict_once(self, x, profile=False, visualize=False, embed=None):
+        y, dt, embeddings = [], [], []
+        embed_set = frozenset(embed) if embed else {-1}
+        max_idx = max(embed_set)
+        x_orig = x  # 保留原始输入用于残差计算
 
-    detection.model[BACKBONE_P2_IDX].register_forward_hook(make_hook("p2"))
-    detection.model[BACKBONE_P3_IDX].register_forward_hook(make_hook("p3"))
+        # ---- Backbone + SPPF + C2PSA (layers 0-10) ----
+        for i in range(11):
+            m = self.model[i]
+            if m.f != -1:
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+            if profile:
+                self._profile_one_layer(m, x, dt)
+            x = m(x)
+            y.append(x if m.i in self.save else None)
+            if visualize:
+                from ultralytics.utils.plotting import feature_visualization
+                feature_visualization(x, m.type, m.i, save_dir=visualize)
+            if m.i in embed_set:
+                embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))
+                if m.i == max_idx:
+                    return torch.unbind(torch.cat(embeddings, 1), dim=0)
 
-    # 包装 forward 方法以包含 AAFM 处理
-    original_forward_once = detection._forward_once
+        # ---- AAFM 门控注入: 在 neck 读取前替换 y[2]/y[4] ----
+        residual = x_orig - self.aafm_blur(x_orig)
+        p2_aafm, p3_aafm = self.aafm(residual, y[2], y[4])
+        if p2_aafm is not None:
+            y[2] = p2_aafm
+        if p3_aafm is not None:
+            y[4] = p3_aafm
 
-    def aafm_forward_once(x, profile=None, visualize=False):
-        # 计算残差
-        residual = x - detection.aafm_blur(x)
-        # 原始 forward（hooks 会捕获 P2/P3）
-        result = original_forward_once(x, profile, visualize)
-        # AAFM 融合（后处理方式，作用于 backbone 输出后的 neck）
-        if "p2" in detection._aafm_features and "p3" in detection._aafm_features:
-            # AAFM stem 处理残差
-            p2_aafm, p3_aafm = detection.aafm(
-                residual,
-                detection._aafm_features["p2"],
-                detection._aafm_features["p3"],
-            )
-            # 注：此处 hooks 捕获的 P2/P3 是 backbone 输出
-            # 完整实现需将 p2_aafm/p3_aafm 注入 neck 计算
-            # 当前版本作为概念验证
-        detection._aafm_features.clear()
-        return result
+        # ---- Neck + Head (layers 11-end) ----
+        for i in range(11, len(self.model)):
+            m = self.model[i]
+            if m.f != -1:
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+            if profile:
+                self._profile_one_layer(m, x, dt)
+            x = m(x)
+            y.append(x if m.i in self.save else None)
+            if visualize:
+                from ultralytics.utils.plotting import feature_visualization
+                feature_visualization(x, m.type, m.i, save_dir=visualize)
+            if m.i in embed_set:
+                embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))
+                if m.i == max_idx:
+                    return torch.unbind(torch.cat(embeddings, 1), dim=0)
 
-    detection._forward_once = aafm_forward_once
-    logger.info("AAFM applied to model (P2/P3 gating via hooks)")
+        return x
+
+    detection._predict_once = types.MethodType(aafm_predict_once, detection)
+    logger.info("AAFM applied: _predict_once interception (backbone→gate→neck)")
     return model
 
 
@@ -210,7 +232,6 @@ def train_phase3(args):
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[
             logging.FileHandler(LOG_DIR / f"{exp_name}.log", encoding="utf-8"),
-            logging.StreamHandler(),
         ],
     )
     print_env()
