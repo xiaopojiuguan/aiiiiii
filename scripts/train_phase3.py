@@ -104,34 +104,59 @@ def compute_class_weights() -> list:
     return weights.tolist()
 
 
-def apply_aafm(model):
-    """对已加载的 YOLO 模型应用 AAFM 结构修改。
+def _get_backbone_channels(detection):
+    """通过 dummy forward 获取 backbone P2/P3 实际输出通道数。"""
+    import torch
+    device = next(detection.parameters()).device
+    dummy = torch.zeros(1, 3, 1280, 1280, device=device)
+    y = []
+    x = dummy
+    with torch.no_grad():
+        for i in range(5):  # layers 0-4, enough to get P2/P3
+            m = detection.model[i]
+            if m.f != -1:
+                x_in = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+            else:
+                x_in = x
+            x = m(x_in)
+            y.append(x)
+    return y[2].shape[1], y[4].shape[1]  # P2, P3 channel counts
 
-    替换 DetectionModel._predict_once：backbone (layers 0-10) 完成后，
-    截取 P2/P3 特征 → AAFM 门控融合 → 注入 y[2]/y[4] → neck 继续。
+
+def apply_aafm(model):
+    """对 YOLO 模型应用 AAFM 结构修改。
+
+    通过替换 _predict_once 实现：backbone (0-10) → AAFM gate y[2]/y[4] → neck (11-end)。
+    支持 checkpoint 恢复：若 detection 已有 aafm 属性则复用权重，仅重挂 _predict_once。
     """
     import types
     from src.models.aafm import AAFMBlock
     from src.models.steelguard import GaussianBlur
 
     detection = model.model
-    width = detection.yaml.get("width_multiple", 0.50)
-    p2_ch = int(128 * width)
-    p3_ch = int(256 * width)
+    device = next(detection.parameters()).device
 
-    aafm_block = AAFMBlock(in_channels=3, stem_channels=32,
-                           p2_channels=p2_ch, p3_channels=p3_ch)
-    blur = GaussianBlur(kernel_size=31, sigma=10.0, channels=3)
-
-    detection.aafm = aafm_block
-    detection.aafm_blur = blur
-    detection.to(model.device if hasattr(model, 'device') else None)
+    # Checkpoint 恢复：复用已有模块权重
+    if hasattr(detection, 'aafm') and hasattr(detection, 'aafm_blur'):
+        aafm_block = detection.aafm
+        blur = detection.aafm_blur
+        logger.info("AAFM: reusing existing modules (checkpoint restore)")
+    else:
+        p2_ch, p3_ch = _get_backbone_channels(detection)
+        logger.info(f"AAFM: backbone P2={p2_ch}ch, P3={p3_ch}ch")
+        aafm_block = AAFMBlock(
+            in_channels=3, stem_channels=32,
+            p2_channels=p2_ch, p3_channels=p3_ch,
+        ).to(device)
+        blur = GaussianBlur(kernel_size=31, sigma=10.0, channels=3).to(device)
+        detection.aafm = aafm_block
+        detection.aafm_blur = blur
 
     def aafm_predict_once(self, x, profile=False, visualize=False, embed=None):
         y, dt, embeddings = [], [], []
         embed_set = frozenset(embed) if embed else {-1}
         max_idx = max(embed_set)
-        x_orig = x  # 保留原始输入用于残差计算
+        x_orig = x
 
         # ---- Backbone + SPPF + C2PSA (layers 0-10) ----
         for i in range(11):
@@ -150,7 +175,7 @@ def apply_aafm(model):
                 if m.i == max_idx:
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
 
-        # ---- AAFM 门控注入: 在 neck 读取前替换 y[2]/y[4] ----
+        # ---- AAFM 门控注入 ----
         residual = x_orig - self.aafm_blur(x_orig)
         p2_aafm, p3_aafm = self.aafm(residual, y[2], y[4])
         if p2_aafm is not None:
@@ -178,36 +203,71 @@ def apply_aafm(model):
         return x
 
     detection._predict_once = types.MethodType(aafm_predict_once, detection)
-    logger.info("AAFM applied: _predict_once interception (backbone→gate→neck)")
+    logger.info("AAFM: _predict_once patched (backbone→gate→neck)")
     return model
 
 
 def apply_mffm(model):
-    """对已加载的 YOLO 模型应用 MFFM 结构修改。"""
+    """对 YOLO 模型应用 MFFM 结构修改。
+
+    替换 Neck 中 P2/P3 融合节点的 C3k2 → MFFMBlock。
+    支持 checkpoint 恢复：若已有 MFFMBlock 则跳过，仅验证。
+    """
+    import torch.nn as nn
     from src.models.mffm import MFFMBlock
 
     detection = model.model
-    width = detection.yaml.get("width_multiple", 0.50)
 
-    p2_ch = int(128 * width)
-    p3_ch = int(256 * width)
+    # P2: layer 19, P3 upsample: layer 16, P3 downsample: layer 22
+    # Checkpoint 恢复：已有 MFFMBlock 则跳过
+    replacements = []
+    for idx in [19, 16, 22]:
+        if idx >= len(detection.model):
+            continue
+        old = detection.model[idx]
+        if isinstance(old, MFFMBlock):
+            logger.info(f"MFFM: layer {idx} already MFFMBlock (checkpoint restore)")
+            continue
+        # 从 C3k2 获取实际通道数
+        if hasattr(old, 'cv3') and hasattr(old.cv3, 'conv'):
+            out_ch = old.cv3.conv.out_channels
+        elif hasattr(old, 'cv2') and hasattr(old.cv2, 'conv'):
+            out_ch = old.cv2.conv.out_channels
+        else:
+            # fallback: try to infer from children
+            out_ch = None
+            for child in old.modules():
+                if isinstance(child, nn.Conv2d):
+                    out_ch = child.out_channels
+                    break
+        if out_ch is None:
+            logger.warning(f"MFFM: cannot determine output channels for layer {idx}, skipping")
+            continue
+        # Input channels: C3k2.cv1 or first conv
+        if hasattr(old, 'cv1') and hasattr(old.cv1, 'conv'):
+            in_ch = old.cv1.conv.in_channels
+        else:
+            in_ch = None
+            for child in old.modules():
+                if isinstance(child, nn.Conv2d):
+                    in_ch = child.in_channels
+                    break
+        if in_ch is None:
+            in_ch = out_ch  # assume same
 
-    # P2/P3 Neck 融合层索引
-    replace_layers = {
-        19: (p2_ch, p2_ch, False),    # P2 fusion, no DCN
-        16: (p3_ch, p3_ch, True),     # P3 upsample fusion, DCN on
-        22: (p3_ch, p3_ch, True),     # P3 downsample fusion, DCN on
-    }
+        use_dcn = (idx != 19)  # P3 layers use DCN, P2 doesn't
+        replacements.append((idx, in_ch, out_ch, use_dcn, old))
 
-    replaced = 0
-    for idx, (in_ch, out_ch, dcn) in replace_layers.items():
-        if idx < len(detection.model):
-            old = detection.model[idx]
-            detection.model[idx] = MFFMBlock(in_ch, out_ch, use_dcn=dcn)
-            logger.info(f"MFFM: layer {idx} {type(old).__name__}→MFFMBlock (dcn={dcn})")
-            replaced += 1
+    for idx, in_ch, out_ch, dcn, old in replacements:
+        mffm = MFFMBlock(in_ch, out_ch, use_dcn=dcn)
+        # 复制 ultralytics 兼容属性
+        mffm.i = old.i if hasattr(old, 'i') else idx
+        mffm.f = old.f if hasattr(old, 'f') else -1
+        mffm.type = "MFFMBlock"
+        detection.model[idx] = mffm
+        logger.info(f"MFFM: layer {idx} replaced ({in_ch}ch→{out_ch}ch, dcn={dcn})")
 
-    logger.info(f"MFFM applied: {replaced} layers replaced")
+    logger.info(f"MFFM: {len(replacements)} layers replaced")
     return model
 
 

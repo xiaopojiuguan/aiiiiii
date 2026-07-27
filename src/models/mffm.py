@@ -1,12 +1,14 @@
 """MFFM: Multi-Morphology Feature Fusion —— 方案 5.2.2
 
-形态感知融合模块，替换 Neck 中 P2/P3 层的标准卷积：
-  - 3×3 卷积分支：局部块状纹理（点状缺陷）
-  - 1×7 卷积分支：横向细长结构（横向划伤）
-  - 7×1 卷积分支：纵向细长结构（纵裂）
-  - 可学习权重归一化融合
+替换 Neck P2/P3 融合节点的标准卷积为多形态并行分支:
+  - 3×3: 块状纹理    - 1×7: 横向细长
+  - 7×1: 纵向细长    - DCNv2: 不规则轮廓
+  可学习 softmax 权重 → 1×1 融合
 
-放在 Neck 高分辨率层（P2/P3），避免显著增加整网计算量。
+修复:
+  - DCNv2 offset 由独立 conv 生成
+  - 模块设置 i/f/type 属性兼容 ultralytics
+  - 模块为标准 nn.Module，checkpoint 自动持久化
 """
 
 import torch
@@ -14,13 +16,13 @@ import torch.nn as nn
 
 
 class MorphConv(nn.Module):
-    """单形态卷积分支：不同 kernel size 捕获不同形态。"""
+    """单形态卷积分支。"""
 
-    def __init__(self, in_ch: int, out_ch: int, kernel_size: tuple, groups: int = 1):
+    def __init__(self, in_ch: int, out_ch: int, kernel_size: tuple):
         super().__init__()
-        padding = (kernel_size[0] // 2, kernel_size[1] // 2)
         self.conv = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, kernel_size, padding=padding, groups=groups, bias=False),
+            nn.Conv2d(in_ch, out_ch, kernel_size,
+                      padding=(kernel_size[0] // 2, kernel_size[1] // 2), bias=False),
             nn.BatchNorm2d(out_ch),
             nn.SiLU(inplace=True),
         )
@@ -29,66 +31,80 @@ class MorphConv(nn.Module):
         return self.conv(x)
 
 
-class MFFMBlock(nn.Module):
-    """多形态特征融合块。
+class DeformConvBlock(nn.Module):
+    """DCNv2 分支：offset conv + deformable conv。"""
 
-    替代 Neck 中的标准 C3k2/Conv 块，在 P2/P3 融合节点使用。
-    四路并行 → 拼接 → 1×1 压缩回原通道数。
+    def __init__(self, in_ch: int, out_ch: int):
+        super().__init__()
+        self.offset_conv = nn.Conv2d(in_ch, 2 * 3 * 3, kernel_size=3, padding=1)
+        self.dcn = nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False)  # fallback
+        try:
+            from torchvision.ops import DeformConv2d
+            self.dcn = DeformConv2d(in_ch, out_ch, 3, padding=1)
+            self._use_dcn = True
+        except ImportError:
+            self._use_dcn = False
+        self.bn = nn.BatchNorm2d(out_ch)
+        self.act = nn.SiLU(inplace=True)
+
+    def forward(self, x):
+        offset = self.offset_conv(x)
+        if self._use_dcn:
+            x = self.dcn(x, offset)
+        else:
+            x = self.dcn(x)
+        return self.act(self.bn(x))
+
+
+class MFFMBlock(nn.Module):
+    """多形态特征融合块，替换 Neck 中的 C3k2。
 
     Args:
-        in_channels: 输入通道数
-        out_channels: 输出通道数（通过 1×1 压缩后）
-        use_dcn: 是否启用 DCNv2 分支（P2 可选，P3 建议开启）
+        in_channels: 输入通道
+        out_channels: 输出通道
+        use_dcn: 是否启用 DCNv2 分支
     """
 
     def __init__(self, in_channels: int, out_channels: int, use_dcn: bool = False):
         super().__init__()
-        mid_channels = out_channels // 4
+        n_branches = 4 if use_dcn else 3
+        mid_ch = out_channels // n_branches
 
-        self.branch_3x3 = MorphConv(in_channels, mid_channels, (3, 3))
-        self.branch_1x7 = MorphConv(in_channels, mid_channels, (1, 7))
-        self.branch_7x1 = MorphConv(in_channels, mid_channels, (7, 1))
+        # 确保 mid_ch > 0
+        mid_ch = max(mid_ch, 8)
 
-        dcn_ch = mid_channels
+        self.branch_3x3 = MorphConv(in_channels, mid_ch, (3, 3))
+        self.branch_1x7 = MorphConv(in_channels, mid_ch, (1, 7))
+        self.branch_7x1 = MorphConv(in_channels, mid_ch, (7, 1))
+        self.use_dcn = use_dcn
+
         if use_dcn:
-            try:
-                from torchvision.ops import DeformConv2d
-                self.branch_dcn = nn.Sequential(
-                    DeformConv2d(in_channels, dcn_ch, 3, padding=1, bias=False),
-                    nn.BatchNorm2d(dcn_ch),
-                    nn.SiLU(inplace=True),
-                )
-            except ImportError:
-                # DCNv2 不可用时退化为普通 3×3
-                self.branch_dcn = MorphConv(in_channels, dcn_ch, (3, 3))
+            self.branch_dcn = DeformConvBlock(in_channels, mid_ch)
+            total = mid_ch * 4
+            self.branch_weights = nn.Parameter(torch.ones(4))
         else:
-            dcn_ch = 0
+            total = mid_ch * 3
+            self.branch_weights = nn.Parameter(torch.ones(3))
 
-        total_mid = mid_channels * 3 + dcn_ch
-        self.fuse = nn.Conv2d(total_mid, out_channels, 1, bias=False)
+        self.fuse = nn.Conv2d(total, out_channels, 1, bias=False)
         self.norm = nn.BatchNorm2d(out_channels)
         self.act = nn.SiLU(inplace=True)
 
-        # 可学习权重（对四个分支做加权）
-        self.branch_weights = nn.Parameter(torch.ones(4))
+        # ultralytics 兼容属性（由 apply_mffm 设置）
+        self.i = -1
+        self.f = -1
+        self.type = "MFFMBlock"
 
     def forward(self, x):
-        b3 = self.branch_3x3(x)
-        b17 = self.branch_1x7(x)
-        b71 = self.branch_7x1(x)
+        branches = [
+            self.branch_3x3(x),
+            self.branch_1x7(x),
+            self.branch_7x1(x),
+        ]
+        if self.use_dcn:
+            branches.append(self.branch_dcn(x))
 
-        branches = [b3, b17, b71]
-
-        if hasattr(self, 'branch_dcn'):
-            b_dcn = self.branch_dcn(x)
-            branches.append(b_dcn)
-
-        # 可学习权重 + softmax 归一化
-        weights = torch.softmax(self.branch_weights[:len(branches)], dim=0)
-        weighted = [w * b for w, b in zip(weights, branches)]
-
+        w = torch.softmax(self.branch_weights, dim=0)
+        weighted = [w[i] * b for i, b in enumerate(branches)]
         fused = torch.cat(weighted, dim=1)
-        out = self.fuse(fused)
-        out = self.norm(out)
-        out = self.act(out)
-        return out
+        return self.act(self.norm(self.fuse(fused)))
