@@ -1,0 +1,80 @@
+# ============================================================
+# DEIM-D-FINE-X 模型结构配置
+# ============================================================
+# Backbone:  HGNetv2-X (62M params, D-FINE 全系默认骨干)
+# Encoder:   HybridEncoder (多尺度 deformable attention)
+# Decoder:   DFINE_DECODER + DEIM 密集匹配 + FDR 分布回归
+# 核心改进:
+#   - DEIM: 前半段训练密集 O2O 匹配 → 更多正样本监督信号
+#   - D-FINE FDR: 框坐标从4个标量 → 概率分布精修 → 亚像素定位
+#   - 两者叠加: 小数据集 + 密集缺陷 + 框贴不准 → 三重命中
+
+model: DEIM_DFINE
+criterion: DEIMDFINECriterion
+postprocessor: DFINEPostProcessor
+
+eval_spatial_size: [1280, 1280]
+
+# ============================================================
+# Backbone: HGNetv2-X
+# ============================================================
+backbone:
+  name: HGNetv2
+  variant: X                                    # 最大号: 62M params
+  freeze_at: [1, 2, 3]                          # 冻结 stem + stage1-3
+  pretrain: https://github.com/Peterande/D-FINE/releases/download/pretrain/hgnetv2_x_imagenet1k.pth
+
+# ============================================================
+# Encoder: HybridEncoder
+# ============================================================
+encoder:
+  hidden_dim: 256
+  cnn_depth: 3                                  # CNN 分支深度
+  num_levels: 3                                 # C3 C4 C5 三个尺度
+  num_points: [4, 8, 16]                        # 各层采样点数
+  nhead: 8
+  dim_feedforward: 1024
+  dropout: 0.0
+  act: relu
+
+# ============================================================
+# Decoder: D-FINE + DEIM 密集匹配
+# ============================================================
+decoder:
+  type: DFINE_DECODER
+  num_queries: 300
+  hidden_dim: 256
+  nhead: 8
+  dim_feedforward: 1024
+  dec_layers: 6
+  aux_loss: True                                # 中间层辅助损失
+  num_points_dec: 4
+  act: silu
+  # ---- D-FINE FDR 细粒度分布回归 ----
+  reg_max: 16                                   # 分布离散化 bin 数
+  fdr_alpha: 1.0                                # FDR 强度系数
+  # ---- DEIM 密集 O2O 匹配 ----
+  use_deim: True                                # 启用 DEIM
+  dense_match_stop_epoch: {DEIM_STOP_EPOCH}       # 前半段密集匹配, 后半段关闭
+
+# ============================================================
+# 损失函数: MAL + BBox + GIoU + DDF + FGL
+# ============================================================
+loss:
+  weight_dict:
+    loss_mal: 1.0          # DEIM Matching-Aware Loss (感知匹配分类)
+    loss_bbox: 5.0         # L1 框回归
+    loss_giou: 2.0         # GIoU
+    loss_ddf: 1.5          # D-FINE Distribution Focal 分布损失
+    loss_fgl: 0.15         # Focal 辅助损失
+  losses: ["mal", "boxes", "local"]
+  focal_alpha: 0.75
+  focal_gamma: 2.0
+  mal_gamma: 1.5
+
+# ============================================================
+# 后处理: 无 NMS
+# ============================================================
+DFINEPostProcessor:
+  num_select: 300
+  use_nms: False

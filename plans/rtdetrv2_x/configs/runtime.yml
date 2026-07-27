@@ -1,0 +1,85 @@
+# ============================================================
+# RT-DETRv2-X 训练运行时配置
+# ============================================================
+# 关键差异化参数 (X 模型 vs S/M/L):
+# - backbone_lr = 1e-6 (系数 0.01) — 大骨干保护预训练特征
+# - decoder_lr  = 1e-4 — 解码器从头训, 正常学习率
+# - batch=4       — 1280 分辨率下 48GB 卡的平衡值
+# - epoch=72      — DETR 收敛所需最少轮数
+
+output_dir: {OUTPUT_DIR}              # 运行时注入
+
+# ============================================================
+# 优化器 (AdamW)
+# ============================================================
+optimizer:
+  type: AdamW
+  lr: 0.0001                          # 默认 lr (decoder/head)
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+  # 分层学习率: backbone 用系数压到 1e-6
+  param_groups:
+    - params: backbone
+      lr_mult: 0.01                   # 0.0001 × 0.01 = 1e-6
+    - params: encoder
+      lr_mult: 1.0                    # = 1e-4
+    - params: decoder
+      lr_mult: 1.0                    # = 1e-4
+
+# ============================================================
+# 学习率调度 (Cosine + Warmup)
+# ============================================================
+lr_scheduler:
+  type: CosineDecay
+  max_epochs: {EPOCHS}                # 运行时注入
+  warmup_steps: 2000                  # 前 2000 步线性 warmup
+  warmup_start_lr: 1e-6
+  min_lr_ratio: 0.01                  # 最低 lr = 1e-6
+
+# ============================================================
+# EMA (指数移动平均) — DETR 标配
+# ============================================================
+use_ema: True
+ema:
+  decay: 0.9999
+  warmup: 2000
+  use_ema_weights_for_eval_only: True
+
+# ============================================================
+# 训练循环
+# ============================================================
+epoches: {EPOCHS}                     # 运行时注入 (默认 72)
+
+# 动态数据增强: 最后 2 epoch 关闭强增强
+# (RT-DETRv2 核心 trick: 早期强增强学鲁棒 → 后期关闭适配目标域)
+use_dynamic_aug: True
+dynamic_aug_policy:
+  start_epoch: 0
+  end_epoch: {DYNAMIC_AUG_END}        # epoch-2, 运行时计算
+
+# 梯度裁剪
+clip_max_norm: 0.1
+
+# 混合精度
+use_amp: True
+scaler:
+  type: GradScaler
+  enabled: True
+
+# ============================================================
+# 验证 & 保存
+# ============================================================
+eval_interval: 1                      # 每 epoch 验证一次
+checkpoint_interval: 5                # 每 5 epoch 存 checkpoint
+
+# 早停
+early_stop:
+  patience: 15                        # 15 epoch 不涨才停
+  metric: coco_bbox_mAP50
+
+# ============================================================
+# 日志
+# ============================================================
+log_interval: 10                      # 每 10 iter 打印 loss
+use_tensorboard: True

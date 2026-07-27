@@ -1,0 +1,75 @@
+# ============================================================
+# RT-DETRv2-X 数据集配置 (SteelGuard 板材缺陷检测)
+# ============================================================
+# COCO JSON 格式, 由 convert_to_coco.py 从 YOLO txt 生成
+# 图像: 1280×1280 RGB 三通道切片
+# 类别: 9 类缺陷
+
+task: detection
+
+num_classes: 9
+remap_mscoco_category: False          # 不映射 COCO 80 类, 直接用 1-9
+
+# ============================================================
+# 训练集
+# ============================================================
+train_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: {TRAIN_IMG_DIR}        # 运行时注入
+    ann_file: {TRAIN_JSON}             # 运行时注入
+    return_masks: False
+    transforms:
+      type: Compose
+      ops:
+        - type: RandomPhotometricDistort
+          brightness: [0.8, 1.2]
+          contrast: [0.8, 1.2]
+          saturation: [0.8, 1.2]
+          hue: [0.0, 0.0]              # 灰度图不调色相
+        - type: RandomZoomOut
+          fill_value: [123.675, 116.28, 103.53]
+        - type: RandomIoUCrop
+          min_scale: 0.3
+          max_scale: 1.0
+          min_aspect_ratio: 0.5
+          max_aspect_ratio: 2.0
+        - type: RandomHorizontalFlip
+          prob: 0.5
+        - type: Resize
+          size: [1280, 1280]
+          max_size: 1280
+        - type: Normalize
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
+        - type: ToTensor
+  shuffle: True
+  num_workers: 4
+  batch_size: {BATCH_SIZE}             # 运行时注入
+  collate_fn: default
+
+# ============================================================
+# 验证集
+# ============================================================
+val_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: {VAL_IMG_DIR}
+    ann_file: {VAL_JSON}
+    return_masks: False
+    transforms:
+      type: Compose
+      ops:
+        - type: Resize
+          size: [1280, 1280]
+          max_size: 1280
+        - type: Normalize
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
+        - type: ToTensor
+  shuffle: False
+  num_workers: 4
+  batch_size: {VAL_BATCH_SIZE}
+  collate_fn: default

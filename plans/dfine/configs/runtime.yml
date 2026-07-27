@@ -1,0 +1,66 @@
+# ============================================================
+# DEIM-D-FINE-X 训练运行时配置
+# ============================================================
+# 训练轮次: 36 epoch (DEIM 密集匹配减半, 原生 D-FINE 72)
+# 关键调度:
+#   - FlatCosine lr: warmup 2000 iter → flat 22 epoch → cosine 衰减
+#   - DEIM 密集匹配: 前 18 epoch 开启 → 后 18 epoch 关闭去噪
+#   - 数据增强: 前 4 epoch 热身 → 最后 2 epoch 关闭强增强
+
+output_dir: {OUTPUT_DIR}
+
+# ============================================================
+# 训练全局
+# ============================================================
+total_epochs: {EPOCHS}                   # 默认 36
+
+# 数据增强调度
+aug_schedule:
+  warm_epoch: 4                           # 前4轮热身
+  no_aug_last_epoch: 2                    # 最后2轮关强增强
+
+# ============================================================
+# 优化器 AdamW 分层学习率
+# ============================================================
+optimizer:
+  type: AdamW
+  params:
+    - params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 1e-6                            # 大骨干极低 lr, 保护预训练特征
+      weight_decay: 1e-4
+    - params: '^(?=.*encoder|.*decoder)(?!.*norm|bn).*$'
+      lr: 1e-4                            # encoder/decoder 正常 lr
+      weight_decay: 1e-4
+    - params: '.*(norm|bn).*$'
+      lr: 1e-4
+      weight_decay: 0.0                   # BN/LN 层不做 weight decay
+  betas: [0.9, 0.999]
+
+# ============================================================
+# FlatCosine 学习率调度 (DEIM 专用)
+# ============================================================
+lr_scheduler:
+  type: FlatCosine
+  warmup_iter: 2000                       # 前 2000 iter 线性 warmup
+  flat_epoch: {FLAT_EPOCH}                # 平顶持续 N 轮
+  lr_gamma: 0.5                           # 衰减系数
+  min_lr_ratio: 0.01
+
+# ============================================================
+# EMA 指数滑动平均
+# ============================================================
+ema:
+  decay: 0.9998
+  update_after_step: 100
+
+# ============================================================
+# 训练控制
+# ============================================================
+seed: 0
+use_amp: True
+clip_max_norm: 0.1
+
+# 打印 & 保存频率
+print_freq: 10                            # 每 10 batch 打印 loss
+checkpoint_freq: 5                        # 每 5 epoch 存 checkpoint
+eval_epoch: 1                             # 每 1 epoch 验证

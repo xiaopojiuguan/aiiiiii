@@ -1,0 +1,102 @@
+# ============================================================
+# RT-DETRv2-X 模型结构配置
+# ============================================================
+# Backbone:  ResNet101-vd (X 模型核心, 比 R50 深一倍)
+# Encoder:   HybridEncoder (多尺度 deformable attention + CNN 融合)
+# Decoder:   RTDETRTransformerv2 (6 层, 300 queries, 离散采样)
+# 输入尺寸:  1280×1280 (保留小缺陷细节)
+
+model: RTDETR
+criterion: RTDETRCriterionv2
+postprocessor: RTDETRPostProcessor
+
+use_focal_loss: True
+eval_spatial_size: [1280, 1280]
+
+# ============================================================
+# RTDETR 主模型
+# ============================================================
+RTDETR:
+  backbone: PResNet
+  encoder: HybridEncoder
+  decoder: RTDETRTransformerv2
+
+# ============================================================
+# Backbone: ResNet101-vd
+# ============================================================
+PResNet:
+  name: ResNet
+  depth: 101                         # ResNet101
+  variant: d                         # vd 变体 (改进下采样)
+  freeze_at: 0                       # 不冻结任何层
+  return_idx: [1, 2, 3]             # C3 C4 C5 多尺度输出
+  num_stages: 4
+  freeze_norm: False
+  pretrained: True                   # 加载 ImageNet 预训练
+
+# ============================================================
+# Encoder: HybridEncoder (多尺度特征交互)
+# ============================================================
+HybridEncoder:
+  in_channels: [512, 1024, 2048]     # ResNet101 C3 C4 C5 通道
+  hidden_dim: 256
+  expansion: 1.0
+  # ---- Intra-scale: 同层自注意力 ----
+  num_encoder_layers: 1
+  use_encoder_idx: [2]               # 只在 C5 做 intra-scale attention
+  num_points: [4, 4, 4]
+  nhead: 8
+  dim_feedforward: 1024
+  dropout: 0.0
+  activation: 'gelu'
+  # ---- Cross-scale: PAN-like 跨层融合 ----
+  num_decoder_layers: 2
+  num_cross_heads: 8
+  cross_attn_points: 4
+  cross_dim_feedforward: 1024
+  cross_dropout: 0.0
+
+# ============================================================
+# Decoder: RTDETRTransformerv2
+#   相比 v1 的改进:
+#   - 多尺度 deformable attention 每层独立采样点数
+#   - discrete_sample: 部署友好, 省掉 grid_sample 的插值开销
+# ============================================================
+RTDETRTransformerv2:
+  num_queries: 300                   # 每张图最多检测 300 个目标
+  hidden_dim: 256
+  num_layers: 6                      # 6 层解码器
+  num_heads: 8
+  dim_feedforward: 1024
+  dropout: 0.0
+  activation: 'gelu'
+  num_points: [4, 8, 16]            # 多尺度采样点数: C3=4, C4=8, C5=16
+  cross_noise_scale: 0.1
+  num_denoising: 100                 # DAB-DETR 去噪训练
+  label_noise_ratio: 0.5
+  box_noise_scale: 1.0
+  eval_idx: -1                       # 推理时只用最后一层输出
+  aux_loss: True                     # 中间层加辅助损失
+  sample_type: discrete_sample       # 离散采样 (v2 特色, 可部署)
+  use_flash_attn: False              # 不用 flash attention (兼容性)
+  num_classes: 9
+
+# ============================================================
+# 损失函数
+# ============================================================
+RTDETRCriterionv2:
+  weight_dict:
+    loss_vfl: 2
+    loss_bbox: 5
+    loss_giou: 2
+  alpha: 0.75
+  gamma: 2.0
+  matcher:
+    type: HungarianMatcher
+    cost_class: 2
+    cost_bbox: 5
+    cost_giou: 2
+  losses:
+    - vfl
+    - bbox
+    - giou
