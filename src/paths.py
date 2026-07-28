@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # 数据目录
 DATA_ROOT = PROJECT_ROOT / "train" / "train"  # 训练集（JPG+XML）
-TEST_ROOT = PROJECT_ROOT / "test" / "初赛"    # 初赛测试集（JPG）
+TEST_ROOT = Path("/home/aids1/Fail_det2/dataset/test")  # 初赛测试集（JPG）
 
 # 输出目录
 OUTPUT_ROOT = PROJECT_ROOT / "outputs"

@@ -2,7 +2,7 @@
 # 训练数据: 1280×1280 ROI切片
 # 对应方案第 5.1.2 节
 
-path: train
+path: /home/aids1/Fail_det2/dataset
 train: tiles_train/images
 val: tiles_val/images
 
