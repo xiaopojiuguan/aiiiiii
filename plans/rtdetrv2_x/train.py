@@ -23,7 +23,7 @@ PLAN_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = PLAN_DIR / "configs"
 CHECKPOINT_DIR = PROJECT_ROOT / "outputs" / "checkpoints"
 COCO_DIR = PROJECT_ROOT / "outputs" / "coco_annotations"
-RTDETR_DIR = PROJECT_ROOT / "RT-DETR"          # lyuwenyu/RT-DETR 仓库位置
+RTDETR_DIR = PROJECT_ROOT / "RT-DETR" / "rtdetrv2_pytorch"  # lyuwenyu/RT-DETR 子目录
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,22 +50,19 @@ def print_env():
 
 def setup_rtdetr() -> bool:
     """确保 lyuwenyu/RT-DETR 仓库可用 (PyTorch 分支)。"""
-    if RTDETR_DIR.exists() and (RTDETR_DIR / "src").exists():
-        logger.info("RT-DETR repo found.")
+    rtdetr_root = PROJECT_ROOT / "RT-DETR"  # clone 到顶层目录
+
+    if rtdetr_root.exists() and (rtdetr_root / "rtdetrv2_pytorch" / "src").exists():
+        logger.info("RT-DETR repo found (rtdetrv2_pytorch).")
         return True
 
     logger.info("Cloning RT-DETR (PyTorch) from GitHub...")
     try:
         subprocess.run(
             ["git", "clone", "https://github.com/lyuwenyu/RT-DETR.git",
-             str(RTDETR_DIR)],
+             str(rtdetr_root)],
             check=True, cwd=str(PROJECT_ROOT),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        )
-        # 安装依赖
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-e", "."],
-            check=False, cwd=str(RTDETR_DIR),
         )
         logger.info("RT-DETR setup complete.")
         return True

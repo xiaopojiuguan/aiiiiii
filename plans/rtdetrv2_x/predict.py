@@ -24,7 +24,7 @@ import yaml
 # ==== 路径配置 ====
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PLAN_DIR = Path(__file__).resolve().parent
-RTDETR_DIR = PROJECT_ROOT / "RT-DETR"
+RTDETR_DIR = PROJECT_ROOT / "RT-DETR" / "rtdetrv2_pytorch"  # lyuwenyu/RT-DETR 子目录
 sys.path.insert(0, str(RTDETR_DIR / "src"))
 
 from src.paths import (
