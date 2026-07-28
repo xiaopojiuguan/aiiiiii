@@ -13,7 +13,7 @@
   python plans/rtdetrv2_x/train.py --epochs 100 # 自定义轮数
 """
 
-import sys, os, argparse, logging, subprocess, json, shutil
+import sys, os, argparse, logging, subprocess, json, shutil, yaml
 from pathlib import Path
 from datetime import datetime
 
@@ -75,8 +75,8 @@ def setup_rtdetr() -> bool:
 
 
 def convert_data() -> bool:
-    """调用 dfine 的转换脚本生成 COCO JSON。"""
-    convert_script = PROJECT_ROOT / "plans" / "dfine" / "convert_to_coco.py"
+    """YOLO txt → COCO JSON，调用本方案的 convert_to_coco.py。"""
+    convert_script = PLAN_DIR / "convert_to_coco.py"
 
     if COCO_DIR.exists() and (COCO_DIR / "train.json").exists():
         train_size = (COCO_DIR / "train.json").stat().st_size
@@ -93,8 +93,6 @@ def convert_data() -> bool:
 
 def build_final_config(args, exp_name: str, output_dir: Path) -> Path:
     """把三个分拆 yml 拼成 RT-DETR 可读的单一配置文件。"""
-    import yaml
-
     with open(PROJECT_ROOT / "tile_dataset.yaml") as f:
         tile_cfg = yaml.safe_load(f)
 
@@ -127,9 +125,9 @@ def build_final_config(args, exp_name: str, output_dir: Path) -> Path:
         raw = raw.replace("{OUTPUT_DIR}", str(output_dir.resolve()))
         configs[name] = yaml.safe_load(raw)
 
-    # 合并
+    # 合并 (dataset → model → runtime, 后者覆盖前者)
     final = {}
-    for name in ["model", "runtime", "dataset"]:
+    for name in ["dataset", "model", "runtime"]:
         final.update(configs[name])
 
     # 存到 output 目录下
@@ -176,12 +174,10 @@ def train(args, config_path: Path):
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    env["CUDA_LAUNCH_BLOCKING"] = "1"   # 方便定位 CUDA 错误
 
     cmd = [
         sys.executable, "-u", str(train_script),
         "--config", str(config_path),
-        "--use-amp",
     ] + resume_flag
 
     try:

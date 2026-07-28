@@ -22,7 +22,7 @@ backbone:
   name: HGNetv2
   variant: X                                    # 最大号: 62M params
   freeze_at: [1, 2, 3]                          # 冻结 stem + stage1-3
-  pretrain: https://github.com/Peterande/D-FINE/releases/download/pretrain/hgnetv2_x_imagenet1k.pth
+  pretrained: https://github.com/Peterande/D-FINE/releases/download/pretrain/hgnetv2_x_imagenet1k.pth
 
 # ============================================================
 # Encoder: HybridEncoder

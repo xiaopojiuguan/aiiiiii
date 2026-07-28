@@ -189,7 +189,6 @@ def train(args, config_path: Path):
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    env["CUDA_LAUNCH_BLOCKING"] = "1"
 
     cmd = [
         sys.executable, "-u", str(train_script),
